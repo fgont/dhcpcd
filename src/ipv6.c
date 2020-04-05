@@ -1817,29 +1817,6 @@ ipv6_handleifa_addrs(int cmd,
 }
 
 #ifdef IPV6_MANAGETEMPADDR
-static const struct ipv6_addr *
-ipv6_findaddrid(struct dhcpcd_ctx *ctx, uint8_t *addr)
-{
-	const struct interface *ifp;
-	const struct ipv6_state *state;
-	const struct ipv6_addr *ia;
-
-	TAILQ_FOREACH(ifp, ctx->ifaces, next) {
-		if ((state = IPV6_CSTATE(ifp))) {
-			TAILQ_FOREACH(ia, &state->addrs, next) {
-				if (memcmp(&ia->addr.s6_addr[8], addr, 8) == 0)
-					return ia;
-			}
-		}
-	}
-	return NULL;
-}
-
-static const uint8_t nullid[8];
-static const uint8_t anycastid[8] = {
-    0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x80 };
-static const uint8_t isatapid[4] = { 0x00, 0x00, 0x5e, 0xfe };
-
 static void
 ipv6_regen_desync(struct interface *ifp)
 {
@@ -1892,11 +1869,9 @@ struct ipv6_addr *
 ipv6_createtempaddr(struct ipv6_addr *ia0, const struct timespec *now)
 {
 	struct ipv6_state *state;
-	const struct ipv6_state *cstate;
 	struct in6_addr addr;
-	const struct ipv6_addr *ap;
 	struct ipv6_addr *ia;
-	uint32_t i, trylimit;
+	uint32_t i;
 
 	trylimit = TEMP_IDGEN_RETRIES;
 	state = IPV6_STATE(ia0->iface);
@@ -1936,6 +1911,8 @@ int
 ipv6_gentempaddr(struct ipv6_addr *ia0, struct in6_addr *addr)
 {
 	struct in6_addr mask;
+	const struct ipv6_state *cstate;
+	const struct ipv6_addr *ap;
 	const struct interface *ifp;
 	unsigned int i, trylimit=5; /* This is a somewhat arbitrary value */
 
@@ -1943,15 +1920,15 @@ ipv6_gentempaddr(struct ipv6_addr *ia0, struct in6_addr *addr)
 	ipv6_mask(&mask, ia0->prefix_len);
 	/* clear the old ifid */
 	for (i = 0; i < 4; i++)
-		addr.s6_addr32[i] &= mask.s6_addr32[i];
+		addr->s6_addr32[i] &= mask.s6_addr32[i];
 
 regen:
 	if (--trylimit == 0) {
 		return -1;
 	}
 
-	addr.s6_addr32[2] |= arc4random() & ~mask.s6_addr32[2];
-	addr.s6_addr32[3] |= arc4random() & ~mask.s6_addr32[3];
+	addr->s6_addr32[2] |= arc4random() & ~mask.s6_addr32[2];
+	addr->s6_addr32[3] |= arc4random() & ~mask.s6_addr32[3];
 
 	/*  Check if interface identifier is Reserved IPv6 Interface Identifer
 	 *  (http://www.iana.org/assignments/ipv6-interface-ids/ipv6-interface-ids.xhtml)
