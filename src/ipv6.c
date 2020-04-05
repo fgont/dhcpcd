@@ -1862,64 +1862,6 @@ ipv6_regen_desync(struct interface *ifp)
 }
 
 
-
-/*
- * This implementation should cope with UINT_MAX seconds on a system
- * where time_t is INT32_MAX. It should also cope with the monotonic timer
- * wrapping, although this is highly unlikely.
- * unsigned int should match or be greater than any on wire specified timeout.
- */
-static int
-eloop_q_timeout_add(struct eloop *eloop, int queue,
-    unsigned int seconds, unsigned int nseconds,
-    void (*callback)(void *), void *arg)
-{
-	struct eloop_timeout *t, *tt = NULL;
-
-	assert(eloop != NULL);
-	assert(callback != NULL);
-	assert(nseconds <= NSEC_PER_SEC);
-
-	/* Remove existing timeout if present. */
-	TAILQ_FOREACH(t, &eloop->timeouts, next) {
-		if (t->callback == callback && t->arg == arg) {
-			TAILQ_REMOVE(&eloop->timeouts, t, next);
-			break;
-		}
-	}
-
-	if (t == NULL) {
-		/* No existing, so allocate or grab one from the free pool. */
-		if ((t = TAILQ_FIRST(&eloop->free_timeouts))) {
-			TAILQ_REMOVE(&eloop->free_timeouts, t, next);
-		} else {
-			if ((t = malloc(sizeof(*t))) == NULL)
-				return -1;
-		}
-	}
-
-	eloop_reduce_timers(eloop);
-
-	t->seconds = seconds;
-	t->nseconds = nseconds;
-	t->callback = callback;
-	t->arg = arg;
-	t->queue = queue;
-
-	/* The timeout list should be in chronological order,
-	 * soonest first. */
-	TAILQ_FOREACH(tt, &eloop->timeouts, next) {
-		if (t->seconds < tt->seconds ||
-		    (t->seconds == tt->seconds && t->nseconds < tt->nseconds))
-		{
-			TAILQ_INSERT_BEFORE(tt, t, next);
-			return 0;
-		}
-	}
-	TAILQ_INSERT_TAIL(&eloop->timeouts, t, next);
-	return 0;
-}
-
 /* RFC4941 Section 3.3.7 */
 static void
 ipv6_tempdadcallback(void *arg)
@@ -1995,7 +1937,7 @@ ipv6_gentempaddr(struct ipv6_addr *ia0, struct in6_addr *addr)
 {
 	struct in6_addr mask;
 	const struct interface *ifp;
-	unsigned int trylimit=5; /* This is a somewhat arbitrary value */
+	unsigned int i, trylimit=5; /* This is a somewhat arbitrary value */
 
 	*addr = ia0->addr;
 	ipv6_mask(&mask, ia0->prefix_len);
