@@ -298,7 +298,7 @@ void ipv6_freedrop(struct interface *, int);
 #define ipv6_drop(ifp) ipv6_freedrop((ifp), 2)
 
 #ifdef IPV6_MANAGETEMPADDR
-ipv6_gentempaddr(struct ipv6_addr *, struct in6_addr *);
+int ipv6_gentempaddr(struct ipv6_addr *, struct in6_addr *);
 struct ipv6_addr *ipv6_createtempaddr(struct ipv6_addr *,
     const struct timespec *);
 struct ipv6_addr *ipv6_settemptime(struct ipv6_addr *, int);
