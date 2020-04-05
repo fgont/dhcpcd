@@ -54,8 +54,8 @@
 #  define ND6_INFINITE_LIFETIME		((uint32_t)~0)
 #endif
 
-/* RFC4941 constants */
-#define TEMP_VALID_LIFETIME	604800	/* 1 week */
+/* draft-ietf-6man-rfc4941bis constants */
+#define TEMP_VALID_LIFETIME	172800	/* 2 days */
 #define TEMP_PREFERRED_LIFETIME	86400	/* 1 day */
 #define REGEN_ADVANCE		5	/* seconds */
 #define MAX_DESYNC_FACTOR	600	/* 10 minutes */
@@ -245,9 +245,6 @@ struct ipv6_state {
 
 #ifdef IPV6_MANAGETEMPADDR
 	uint32_t desync_factor;
-	uint8_t randomseed0[8]; /* upper 64 bits of MD5 digest */
-	uint8_t randomseed1[8]; /* lower 64 bits */
-	uint8_t randomid[8];
 #endif
 };
 
@@ -301,7 +298,7 @@ void ipv6_freedrop(struct interface *, int);
 #define ipv6_drop(ifp) ipv6_freedrop((ifp), 2)
 
 #ifdef IPV6_MANAGETEMPADDR
-void ipv6_gentempifid(struct interface *);
+ipv6_gentempaddr(struct ipv6_addr *, struct in6_addr *);
 struct ipv6_addr *ipv6_createtempaddr(struct ipv6_addr *,
     const struct timespec *);
 struct ipv6_addr *ipv6_settemptime(struct ipv6_addr *, int);

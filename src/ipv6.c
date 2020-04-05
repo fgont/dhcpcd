@@ -121,10 +121,7 @@
 #endif
 
 #ifdef IPV6_MANAGETEMPADDR
-static void ipv6_regentempifid(void *);
 static void ipv6_regentempaddr(void *);
-#else
-#define ipv6_regentempifid(a) {}
 #endif
 
 int
@@ -1052,11 +1049,6 @@ ipv6_getstate(struct interface *ifp)
 		}
 		TAILQ_INIT(&state->addrs);
 		TAILQ_INIT(&state->ll_callbacks);
-
-		/* Regenerate new ids */
-		if (ifp->options &&
-		    ip6_use_tempaddr(ifp->name))
-			ipv6_regentempifid(ifp);
 	}
 	return state;
 }
@@ -1729,12 +1721,6 @@ ipv6_start(struct interface *ifp)
 	if (ipv6_tryaddlinklocal(ifp) == -1)
 		return -1;
 
-	if (IPV6_CSTATE(ifp)) {
-		/* Regenerate new ids */
-		if (ip6_use_tempaddr(ifp->name))
-			ipv6_regentempifid(ifp);
-	}
-
 	return 0;
 }
 
@@ -1855,7 +1841,7 @@ static const uint8_t anycastid[8] = {
 static const uint8_t isatapid[4] = { 0x00, 0x00, 0x5e, 0xfe };
 
 static void
-ipv6_regen_desync(struct interface *ifp, int force)
+ipv6_regen_desync(struct interface *ifp)
 {
 	struct ipv6_state *state;
 	unsigned int max, pref;
@@ -1868,69 +1854,75 @@ ipv6_regen_desync(struct interface *ifp, int force)
 	 * TEMP_PREFERRED_LIFETIME - REGEN_ADVANCE. */
 	pref = (unsigned int)ip6_temp_preferred_lifetime(ifp->name);
 	max = pref - REGEN_ADVANCE;
-	if (state->desync_factor && !force && state->desync_factor < max)
+	if (state->desync_factor && state->desync_factor < max)
 		return;
-	if (state->desync_factor == 0)
+	else 
 		state->desync_factor =
 		    arc4random_uniform(MIN(MAX_DESYNC_FACTOR, max));
-	max = pref - state->desync_factor - REGEN_ADVANCE;
-	eloop_timeout_add_sec(ifp->ctx->eloop, max, ipv6_regentempifid, ifp);
 }
 
-void
-ipv6_gentempifid(struct interface *ifp)
+
+
+/*
+ * This implementation should cope with UINT_MAX seconds on a system
+ * where time_t is INT32_MAX. It should also cope with the monotonic timer
+ * wrapping, although this is highly unlikely.
+ * unsigned int should match or be greater than any on wire specified timeout.
+ */
+static int
+eloop_q_timeout_add(struct eloop *eloop, int queue,
+    unsigned int seconds, unsigned int nseconds,
+    void (*callback)(void *), void *arg)
 {
-	struct ipv6_state *state;
-	MD5_CTX md5;
-	uint8_t seed[16], digest[16];
-	int retry;
+	struct eloop_timeout *t, *tt = NULL;
 
-	if ((state = IPV6_STATE(ifp)) == NULL)
-		return;
+	assert(eloop != NULL);
+	assert(callback != NULL);
+	assert(nseconds <= NSEC_PER_SEC);
 
-	retry = 0;
-	if (memcmp(nullid, state->randomseed0, sizeof(nullid)) == 0) {
-		uint32_t r;
-
-		r = arc4random();
-		memcpy(seed, &r, sizeof(r));
-		r = arc4random();
-		memcpy(seed + sizeof(r), &r, sizeof(r));
-	} else
-		memcpy(seed, state->randomseed0, sizeof(state->randomseed0));
-
-	memcpy(seed + sizeof(state->randomseed0),
-	    state->randomseed1, sizeof(state->randomseed1));
-
-again:
-	MD5Init(&md5);
-	MD5Update(&md5, seed, sizeof(seed));
-	MD5Final(digest, &md5);
-
-	/* RFC4941 Section 3.2.1.1
-	 * Take the left-most 64bits and set bit 6 to zero */
-	memcpy(state->randomid, digest, sizeof(state->randomid));
-	state->randomid[0] = (uint8_t)(state->randomid[0] & ~EUI64_UBIT);
-
-	/* RFC4941 Section 3.2.1.4
-	 * Reject reserved or existing id's */
-	if (memcmp(nullid, state->randomid, sizeof(nullid)) == 0 ||
-	    (memcmp(anycastid, state->randomid, 7) == 0 &&
-	    (anycastid[7] & state->randomid[7]) == anycastid[7]) ||
-	    memcmp(isatapid, state->randomid, sizeof(isatapid)) == 0 ||
-	    ipv6_findaddrid(ifp->ctx, state->randomid))
-	{
-		if (++retry < GEN_TEMPID_RETRY_MAX) {
-			memcpy(seed, digest + 8, 8);
-			goto again;
+	/* Remove existing timeout if present. */
+	TAILQ_FOREACH(t, &eloop->timeouts, next) {
+		if (t->callback == callback && t->arg == arg) {
+			TAILQ_REMOVE(&eloop->timeouts, t, next);
+			break;
 		}
-		memset(state->randomid, 0, sizeof(state->randomid));
 	}
 
-	/* RFC4941 Section 3.2.1.6
-	 * Save the right-most 64bits of the digest */
-	memcpy(state->randomseed0, digest + 8,
-	    sizeof(state->randomseed0));
+	if (t == NULL) {
+		/* No existing, so allocate or grab one from the free pool. */
+		if ((t = TAILQ_FIRST(&eloop->free_timeouts))) {
+			TAILQ_REMOVE(&eloop->free_timeouts, t, next);
+		} else {
+			if ((t = malloc(sizeof(*t))) == NULL)
+				return -1;
+		}
+	}
+
+	eloop_reduce_timers(eloop);
+
+	t->seconds = seconds;
+	t->nseconds = nseconds;
+	t->callback = callback;
+	t->arg = arg;
+	t->queue = queue;
+
+	/* The timeout list should be in chronological order,
+	 * soonest first. */
+	TAILQ_FOREACH(tt, &eloop->timeouts, next) {
+		if (t->seconds < tt->seconds ||
+		    (t->seconds == tt->seconds && t->nseconds < tt->nseconds))
+		{
+			TAILQ_INSERT_BEFORE(tt, t, next);
+			return 0;
+		}
+	}
+	TAILQ_INSERT_TAIL(&eloop->timeouts, t, next);
+	return 0;
+}
+
+
+***********
+
 }
 
 /* RFC4941 Section 3.3.7 */
@@ -1964,58 +1956,16 @@ ipv6_createtempaddr(struct ipv6_addr *ia0, const struct timespec *now)
 {
 	struct ipv6_state *state;
 	const struct ipv6_state *cstate;
-	int genid;
-	struct in6_addr addr, mask;
-	uint32_t randid[2];
-	const struct interface *ifp;
+	struct in6_addr addr;
 	const struct ipv6_addr *ap;
 	struct ipv6_addr *ia;
 	uint32_t i, trylimit;
 
 	trylimit = TEMP_IDGEN_RETRIES;
 	state = IPV6_STATE(ia0->iface);
-	genid = 0;
 
-	addr = ia0->addr;
-	ipv6_mask(&mask, ia0->prefix_len);
-	/* clear the old ifid */
-	for (i = 0; i < 4; i++)
-		addr.s6_addr32[i] &= mask.s6_addr32[i];
-
-again:
-	if (memcmp(state->randomid, nullid, sizeof(nullid)) == 0)
-		genid = 1;
-	if (genid) {
-		memcpy(state->randomseed1, &ia0->addr.s6_addr[8],
-		    sizeof(state->randomseed1));
-		ipv6_gentempifid(ia0->iface);
-		if (memcmp(state->randomid, nullid, sizeof(nullid)) == 0) {
-			errno = EFAULT;
-			return NULL;
-		}
-	}
-	memcpy(&randid[0], state->randomid, sizeof(randid[0]));
-	memcpy(&randid[1], state->randomid + sizeof(randid[1]),
-	    sizeof(randid[2]));
-	addr.s6_addr32[2] |= randid[0] & ~mask.s6_addr32[2];
-	addr.s6_addr32[3] |= randid[1] & ~mask.s6_addr32[3];
-
-	/* Ensure we don't already have it */
-	TAILQ_FOREACH(ifp, ia0->iface->ctx->ifaces, next) {
-		cstate = IPV6_CSTATE(ifp);
-		if (cstate) {
-			TAILQ_FOREACH(ap, &cstate->addrs, next) {
-				if (IN6_ARE_ADDR_EQUAL(&ap->addr, &addr)) {
-					if (--trylimit == 0) {
-						errno = EEXIST;
-						return NULL;
-					}
-					genid = 1;
-					goto again;
-				}
-			}
-		}
-	}
+	if(ipv6_gentempaddr(ia0, &addr) == -1)
+		return NULL;
 
 	ia = ipv6_newaddr(ia0->iface, &addr, ia0->prefix_len,
 	    IPV6_AF_AUTOCONF | IPV6_AF_TEMPORARY);
@@ -2025,7 +1975,7 @@ again:
 	ia->created = ia->acquired = now ? *now : ia0->acquired;
 
 	/* Ensure desync is still valid */
-	ipv6_regen_desync(ia->iface, 0);
+	ipv6_regen_desync(ia->iface);
 
 	/* RFC4941 Section 3.3.4 */
 	i = (uint32_t)ip6_temp_preferred_lifetime(ia0->iface->name) -
@@ -2043,6 +1993,68 @@ again:
 
 	TAILQ_INSERT_TAIL(&state->addrs, ia, next);
 	return ia;
+}
+
+int
+ipv6_gentempaddr(struct ipv6_addr *ia0, struct in6_addr *addr)
+{
+	struct in6_addr mask;
+	const struct interface *ifp;
+	unsigned int trylimit=5; /* This is a somewhat arbitrary value */
+
+	*addr = ia0->addr;
+	ipv6_mask(&mask, ia0->prefix_len);
+	/* clear the old ifid */
+	for (i = 0; i < 4; i++)
+		addr.s6_addr32[i] &= mask.s6_addr32[i];
+
+regen:
+	if (--trylimit == 0) {
+		return -1;
+	}
+
+	addr.s6_addr32[2] |= arc4random() & ~mask.s6_addr32[2];
+	addr.s6_addr32[3] |= arc4random() & ~mask.s6_addr32[3];
+
+	/*  Check if interface identifier is Reserved IPv6 Interface Identifer
+	 *  (http://www.iana.org/assignments/ipv6-interface-ids/ipv6-interface-ids.xhtml)
+	 */
+
+	/* Subnet-router anycast: 0000:0000:0000:0000 */
+	if (!(addr->s6_addr32[2] | addr->s6_addr32[3])) {
+		errno= EADDRNOTAVAIL;
+		goto regen;
+	}
+
+	/* IANA Ethernet block: 0200:5EFF:FE00:0000-0200:5EFF:FE00:5212
+	   Proxy Mobile IPv6:   0200:5EFF:FE00:5213
+	   IANA Ethernet block: 0200:5EFF:FE00:5214-0200:5EFF:FEFF:FFFF
+	*/
+	if (ntohl(addr->s6_addr32[2]) == 0x02005eff && (ntohl(addr->s6_addr32[3]) & 0Xff000000) == 0xfe000000) {
+		errno= EADDRNOTAVAIL;
+		goto regen;
+	}
+
+	/* Reserved subnet anycast addresses */
+	if (ntohl(addr->s6_addr32[2]) == 0xfdffffff && ntohl(addr->s6_addr32[3]) >= 0Xffffff80) {
+		errno= EADDRNOTAVAIL;
+		goto regen;
+	}
+
+	/* Ensure we don't already have the address */
+	TAILQ_FOREACH(ifp, ia0->iface->ctx->ifaces, next) {
+		cstate = IPV6_CSTATE(ifp);
+		if (cstate) {
+			TAILQ_FOREACH(ap, &cstate->addrs, next) {
+				if (IN6_ARE_ADDR_EQUAL(&ap->addr, &addr)) {
+					errno = EEXIST;
+					goto regen;
+				}
+			}
+		}
+	}
+
+	return 0;
 }
 
 struct ipv6_addr *
@@ -2082,7 +2094,7 @@ ipv6_settemptime(struct ipv6_addr *ia, int flags)
 			}
 
 			/* Ensure desync is still valid */
-			ipv6_regen_desync(ap->iface, 0);
+			ipv6_regen_desync(ap->iface);
 
 			/* RFC4941 Section 3.3.2
 			 * Extend temporary times, but ensure that they
@@ -2152,19 +2164,6 @@ ipv6_regentempaddr(void *arg)
 		ipv6_addaddr(ia1, &tv);
 	else
 		logerr(__func__);
-}
-
-static void
-ipv6_regentempifid(void *arg)
-{
-	struct interface *ifp = arg;
-	struct ipv6_state *state;
-
-	state = IPV6_STATE(ifp);
-	if (memcmp(state->randomid, nullid, sizeof(state->randomid)))
-		ipv6_gentempifid(ifp);
-
-	ipv6_regen_desync(ifp, 1);
 }
 #endif /* IPV6_MANAGETEMPADDR */
 
