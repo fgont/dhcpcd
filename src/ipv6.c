@@ -1873,7 +1873,6 @@ ipv6_createtempaddr(struct ipv6_addr *ia0, const struct timespec *now)
 	struct ipv6_addr *ia;
 	uint32_t i;
 
-	trylimit = TEMP_IDGEN_RETRIES;
 	state = IPV6_STATE(ia0->iface);
 
 	if(ipv6_gentempaddr(ia0, &addr) == -1)
@@ -1914,7 +1913,7 @@ ipv6_gentempaddr(struct ipv6_addr *ia0, struct in6_addr *addr)
 	const struct ipv6_state *cstate;
 	const struct ipv6_addr *ap;
 	const struct interface *ifp;
-	unsigned int i, trylimit=5; /* This is a somewhat arbitrary value */
+	unsigned int i, trylimit= TEMP_IDGEN_RETRIES;; /* This is a somewhat arbitrary value */
 
 	*addr = ia0->addr;
 	ipv6_mask(&mask, ia0->prefix_len);
@@ -1960,7 +1959,7 @@ regen:
 		cstate = IPV6_CSTATE(ifp);
 		if (cstate) {
 			TAILQ_FOREACH(ap, &cstate->addrs, next) {
-				if (IN6_ARE_ADDR_EQUAL(&ap->addr, &addr)) {
+				if (IN6_ARE_ADDR_EQUAL(&ap->addr, addr)) {
 					errno = EEXIST;
 					goto regen;
 				}
