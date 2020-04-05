@@ -55,8 +55,8 @@
 #endif
 
 /* draft-ietf-6man-rfc4941bis constants */
-#define TEMP_VALID_LIFETIME	172800	/* 2 days */
-#define TEMP_PREFERRED_LIFETIME	86400	/* 1 day */
+#define TEMP_VALID_LIFETIME	600	/* 2 days */
+#define TEMP_PREFERRED_LIFETIME	300	/* 1 day */
 #define REGEN_ADVANCE		5	/* seconds */
 #define MAX_DESYNC_FACTOR	600	/* 10 minutes */
 
