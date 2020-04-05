@@ -1920,11 +1920,6 @@ eloop_q_timeout_add(struct eloop *eloop, int queue,
 	return 0;
 }
 
-
-***********
-
-}
-
 /* RFC4941 Section 3.3.7 */
 static void
 ipv6_tempdadcallback(void *arg)
